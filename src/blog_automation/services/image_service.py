@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageOps
 
 
 class ImageService:
@@ -17,6 +17,6 @@ class ImageService:
 
     def resize_image(self, image_path: Path, width: int, height: int) -> Path:
         with Image.open(image_path) as image:
-            resized = image.convert("RGB").resize((width, height), Image.Resampling.LANCZOS)
+            resized = ImageOps.fit(image.convert("RGB"), (width, height), Image.Resampling.LANCZOS)
             resized.save(image_path)
         return image_path

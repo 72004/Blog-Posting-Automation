@@ -41,6 +41,7 @@ class SeoOutline:
     faqs: list[dict[str, str]] = field(default_factory=list)
     target_keywords: list[str] = field(default_factory=list)
     section_count: int = 3
+    intro: str = ""
 
 
 @dataclass
@@ -67,6 +68,13 @@ class WordPressMediaItem:
 
 
 @dataclass
+class PinterestPin:
+    title: str = ""
+    description: str = ""
+    image_path: str = ""
+
+
+@dataclass
 class WorkflowResult:
     input: WorkflowInput
     research: ResearchSummary
@@ -74,5 +82,6 @@ class WorkflowResult:
     blog: BlogDraft
     images: ImagePlan
     media: list[WordPressMediaItem] = field(default_factory=list)
+    pinterest_pins: list[PinterestPin] = field(default_factory=list)
     wordpress_post_id: int | None = None
     wordpress_post_url: str = ""

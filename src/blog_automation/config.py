@@ -22,6 +22,9 @@ class Settings:
     wordpress_base_url: str
     wordpress_username: str
     wordpress_app_password: str
+    blog_home_base_url: str
+    blog_home_username: str
+    blog_home_password: str
     output_dir: Path
     max_research_results: int
 
@@ -37,6 +40,9 @@ def get_settings() -> Settings:
         wordpress_base_url=_clean_env_value(os.getenv("WORDPRESS_BASE_URL", "")),
         wordpress_username=_clean_env_value(os.getenv("WORDPRESS_USERNAME", "")),
         wordpress_app_password=_clean_env_value(os.getenv("WORDPRESS_APP_PASSWORD", "")),
+        blog_home_base_url=_clean_env_value(os.getenv("BLOG_HOME_URL", "")),
+        blog_home_username=_clean_env_value(os.getenv("BLOG_HOME_USERNAME", "")),
+        blog_home_password=_clean_env_value(os.getenv("BLOG_HOME_PASSWORD", "")),
         output_dir=output_dir,
         max_research_results=int(os.getenv("MAX_RESEARCH_RESULTS", "5")),
     )
