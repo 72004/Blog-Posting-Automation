@@ -29,22 +29,36 @@ SECONDS_PINTEREST_TITLES = 8
 PINTEREST_PIN_COUNT = 3
 
 
-def estimate_phase_boundaries(topic: str) -> dict:
-    """Return elapsed-seconds boundaries (from run start) for each generation phase."""
+GENERATION_MODE_OPTIONS = ["Blog + Pinterest", "Just Blog", "Just Pinterest"]
+
+
+def estimate_phase_plan(topic: str, mode: str) -> list[tuple[float, str]]:
+    """Return [(phase_end_seconds, status_message), ...] in order, for the given mode."""
     section_count = extract_section_count(topic)
-    content_end = SECONDS_INTRO_AND_OUTLINE + section_count * SECONDS_PER_SECTION_TEXT
-    image_end = content_end + section_count * SECONDS_PER_IMAGE
-    publish_end = image_end + SECONDS_PUBLISH
-    pinterest_titles_end = publish_end + SECONDS_PINTEREST_TITLES
-    pinterest_images_end = pinterest_titles_end + PINTEREST_PIN_COUNT * SECONDS_PER_IMAGE
-    return {
-        "section_count": section_count,
-        "content_end": content_end,
-        "image_end": image_end,
-        "publish_end": publish_end,
-        "pinterest_titles_end": pinterest_titles_end,
-        "pinterest_images_end": pinterest_images_end,
-    }
+    phases: list[tuple[float, str]] = []
+    cursor = 0.0
+
+    if mode in ("Blog + Pinterest", "Just Blog"):
+        cursor += SECONDS_INTRO_AND_OUTLINE + section_count * SECONDS_PER_SECTION_TEXT
+        phases.append((cursor, "Sending text request: generating content (intro, outline, and sections)..."))
+        for index in range(1, section_count + 1):
+            cursor += SECONDS_PER_IMAGE
+            phases.append(
+                (cursor, f"Sending image request: generating section image... ({index}/{section_count})")
+            )
+        cursor += SECONDS_PUBLISH
+        phases.append((cursor, "Images ready. Publishing to WordPress..."))
+
+    if mode in ("Blog + Pinterest", "Just Pinterest"):
+        cursor += SECONDS_PINTEREST_TITLES
+        phases.append((cursor, "Sending text request: generating Pinterest titles..."))
+        for index in range(1, PINTEREST_PIN_COUNT + 1):
+            cursor += SECONDS_PER_IMAGE
+            phases.append(
+                (cursor, f"Sending image request: generating Pinterest image... ({index}/{PINTEREST_PIN_COUNT})")
+            )
+
+    return phases
 
 
 def load_history(history_path: Path) -> list[dict]:
@@ -197,6 +211,8 @@ with st.form("generate_form"):
         if location_choice == "Other":
             location_choice = st.text_input("Custom location", placeholder="e.g. Austin, TX")
 
+    generation_mode = st.selectbox("Generate", GENERATION_MODE_OPTIONS, index=0)
+
     submitted = st.form_submit_button("Generate")
 
 if submitted:
@@ -231,16 +247,21 @@ if submitted:
                 base_url=wp_base_url, username=wp_username, app_password=wp_app_password
             )
 
-            phases = estimate_phase_boundaries(workflow_input.topic)
-            section_count = phases["section_count"]
+            phase_plan = estimate_phase_plan(workflow_input.topic, generation_mode)
 
             run_state: dict = {}
 
             def run_workflow() -> None:
                 try:
                     orchestrator = BlogAutomationOrchestrator(settings, wordpress_config=wordpress_config)
-                    run_state["result"] = orchestrator.run(workflow_input, dry_run=False)
-                    run_state["usage"] = orchestrator.openai_service.summary
+                    if generation_mode == "Just Pinterest":
+                        run_state["pinterest_pins"] = orchestrator.run_pinterest_only(workflow_input)
+                    else:
+                        include_pinterest = generation_mode != "Just Blog"
+                        run_state["result"] = orchestrator.run(
+                            workflow_input, dry_run=False, include_pinterest_images=include_pinterest
+                        )
+                        run_state["usage"] = orchestrator.openai_service.summary
                 except Exception as exc:  # noqa: BLE001 - surfaced in the UI below
                     run_state["error"] = exc
 
@@ -249,32 +270,16 @@ if submitted:
             worker.start()
 
             status_text = st.empty()
-            status_text.info("Sending text request: generating content (intro, outline, and sections)...")
+            status_text.info(phase_plan[0][1] if phase_plan else "Generating...")
 
             while worker.is_alive():
                 elapsed = time.time() - start_time
-                if elapsed < phases["content_end"]:
-                    status_text.info(
-                        "Sending text request: generating content (intro, outline, and sections)..."
-                    )
-                elif elapsed < phases["image_end"]:
-                    image_elapsed = elapsed - phases["content_end"]
-                    current_image = min(int(image_elapsed // SECONDS_PER_IMAGE) + 1, section_count)
-                    status_text.info(
-                        f"Sending image request: generating section image... ({current_image}/{section_count})"
-                    )
-                elif elapsed < phases["publish_end"]:
-                    status_text.info("Images ready. Publishing to WordPress...")
-                elif elapsed < phases["pinterest_titles_end"]:
-                    status_text.info("Sending text request: generating Pinterest titles...")
-                elif elapsed < phases["pinterest_images_end"]:
-                    pin_elapsed = elapsed - phases["pinterest_titles_end"]
-                    current_pin = min(int(pin_elapsed // SECONDS_PER_IMAGE) + 1, PINTEREST_PIN_COUNT)
-                    status_text.info(
-                        f"Sending image request: generating Pinterest image... ({current_pin}/{PINTEREST_PIN_COUNT})"
-                    )
-                else:
-                    status_text.info("Finishing up...")
+                message = "Finishing up..."
+                for phase_end, phase_message in phase_plan:
+                    if elapsed < phase_end:
+                        message = phase_message
+                        break
+                status_text.info(message)
                 time.sleep(1)
 
             worker.join()
@@ -282,7 +287,12 @@ if submitted:
 
             if "error" in run_state:
                 st.session_state.pop("has_result", None)
+                st.session_state.pop("has_pinterest_only_result", None)
                 st.error(f"Generation failed: {run_state['error']}")
+            elif generation_mode == "Just Pinterest":
+                st.session_state.pop("has_result", None)
+                st.session_state["has_pinterest_only_result"] = True
+                st.session_state["pinterest_only_pins"] = run_state.get("pinterest_pins", [])
             else:
                 result = run_state["result"]
                 try:
@@ -304,6 +314,7 @@ if submitted:
                     save_history(history_path, history)
                     render_history(history_placeholder, history_path)
 
+                    st.session_state.pop("has_pinterest_only_result", None)
                     st.session_state["has_result"] = True
                     st.session_state["last_result"] = result
                     st.session_state["last_html_content"] = html_content
@@ -312,7 +323,10 @@ if submitted:
 
 # Renders the most recent result on every script run (not just right after clicking
 # Generate) so it survives reruns triggered by Download button clicks.
-if st.session_state.get("has_result"):
+if st.session_state.get("has_pinterest_only_result"):
+    st.success("Pinterest pins generated.")
+    render_pinterest_pins(st.session_state.get("pinterest_only_pins", []))
+elif st.session_state.get("has_result"):
     result = st.session_state["last_result"]
     html_content = st.session_state["last_html_content"]
     draft_filename = st.session_state["last_draft_filename"]

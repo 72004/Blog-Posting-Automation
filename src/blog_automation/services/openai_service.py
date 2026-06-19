@@ -21,6 +21,7 @@ class OpenAIService:
         self.image_request_count = 0
         self.total_input_tokens = 0
         self.total_output_tokens = 0
+        self.request_log_entries: list[dict] = []
 
     @property
     def request_count(self) -> int:
@@ -37,6 +38,7 @@ class OpenAIService:
         }
 
     def _log_request(self, entry: dict) -> None:
+        self.request_log_entries.append(entry)
         if not self.log_path:
             return
         self.log_path.parent.mkdir(parents=True, exist_ok=True)

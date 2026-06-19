@@ -25,6 +25,9 @@ class Settings:
     blog_home_base_url: str
     blog_home_username: str
     blog_home_password: str
+    google_sheets_credentials_path: str
+    google_sheets_credentials_json: str
+    google_sheet_id: str
     output_dir: Path
     max_research_results: int
 
@@ -43,6 +46,9 @@ def get_settings() -> Settings:
         blog_home_base_url=_clean_env_value(os.getenv("BLOG_HOME_URL", "")),
         blog_home_username=_clean_env_value(os.getenv("BLOG_HOME_USERNAME", "")),
         blog_home_password=_clean_env_value(os.getenv("BLOG_HOME_PASSWORD", "")),
+        google_sheets_credentials_path=_clean_env_value(os.getenv("GOOGLE_SHEETS_CREDENTIALS_PATH", "")),
+        google_sheets_credentials_json=os.getenv("GOOGLE_SHEETS_CREDENTIALS_JSON", ""),
+        google_sheet_id=_clean_env_value(os.getenv("GOOGLE_SHEET_ID", "")),
         output_dir=output_dir,
         max_research_results=int(os.getenv("MAX_RESEARCH_RESULTS", "5")),
     )

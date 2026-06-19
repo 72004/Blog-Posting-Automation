@@ -8,6 +8,7 @@ from blog_automation.agents.content_agent import BlogContentAgent
 from blog_automation.agents.research_agent import ResearchAgent
 from blog_automation.config import Settings
 from blog_automation.models.workflow import PinterestPin, WorkflowInput, WorkflowResult
+from blog_automation.services.google_sheets_service import GoogleSheetsService
 from blog_automation.services.image_service import ImageService
 from blog_automation.services.openai_service import OpenAIService
 from blog_automation.services.web_research_service import WebResearchService
@@ -279,8 +280,15 @@ class BlogAutomationOrchestrator:
         )
         self.research_agent = ResearchAgent(self.research_service)
         self.content_agent = BlogContentAgent(self.openai_service)
+        self.google_sheets_service = GoogleSheetsService(
+            settings.google_sheet_id,
+            credentials_path=settings.google_sheets_credentials_path,
+            credentials_json=settings.google_sheets_credentials_json,
+        )
 
-    def run(self, workflow_input: WorkflowInput, dry_run: bool = False) -> WorkflowResult:
+    def run(
+        self, workflow_input: WorkflowInput, dry_run: bool = False, include_pinterest_images: bool = True
+    ) -> WorkflowResult:
         research = self.research_agent.run(workflow_input)
         seo, blog, images, pinterest_pins = self.content_agent.run(workflow_input, research)
 
@@ -345,7 +353,10 @@ class BlogAutomationOrchestrator:
             post_id = int(post["id"])
             post_url = post.get("link", "")
 
-        self._generate_pinterest_images(workflow_input.topic, topic_slug, topic_dir, pinterest_pins)
+        if include_pinterest_images:
+            self._generate_pinterest_images(workflow_input.topic, topic_slug, topic_dir, pinterest_pins)
+        else:
+            pinterest_pins = []
 
         runs_log_path = self.settings.output_dir / "logs" / "runs.jsonl"
         runs_log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -359,6 +370,9 @@ class BlogAutomationOrchestrator:
         }
         with runs_log_path.open("a", encoding="utf-8") as runs_log_file:
             runs_log_file.write(json.dumps(run_summary) + "\n")
+
+        self.google_sheets_service.append_request_rows(self.openai_service.request_log_entries)
+        self.google_sheets_service.append_run_row(run_summary)
 
         return WorkflowResult(
             input=workflow_input,
@@ -412,3 +426,15 @@ class BlogAutomationOrchestrator:
                 pin_image_bytes, f"{topic_slug}_pinterest_{index + 1}.png", pinterest_dir
             )
             pin.image_path = str(pin_image_path)
+
+    def run_pinterest_only(self, workflow_input: WorkflowInput) -> list[PinterestPin]:
+        """Generate just the Pinterest pins, skipping research, blog content, and WordPress.
+
+        Used for the "Just Pinterest" generation mode.
+        """
+        pinterest_pins = self.content_agent.generate_pinterest_pins(workflow_input)
+        topic_slug = slugify(workflow_input.topic)
+        topic_dir = self.settings.output_dir / topic_slug
+        self._generate_pinterest_images(workflow_input.topic, topic_slug, topic_dir, pinterest_pins)
+        self.google_sheets_service.append_request_rows(self.openai_service.request_log_entries)
+        return pinterest_pins

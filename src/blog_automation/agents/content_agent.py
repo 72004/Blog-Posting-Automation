@@ -123,6 +123,26 @@ class BlogContentAgent:
             pinterest_pins.append(pin)
         return pinterest_pins
 
+    def generate_pinterest_pins(self, workflow_input: WorkflowInput) -> list[PinterestPin]:
+        """Generate only the Pinterest titles/descriptions, skipping all blog content.
+
+        Used for the "Just Pinterest" generation mode.
+        """
+        prompt = (
+            f"Generate exactly {PINTEREST_PIN_COUNT} different Pinterest pin titles for the keyword "
+            f"'{workflow_input.topic}', each with 2 to 3 relevant hashtags included. {_pinterest_title_guidance()} "
+            f"For each title, also write a short 1 to 2 sentence Pinterest pin description.\n\n"
+            f"Return your response in exactly this format, with no extra commentary:\n\n"
+            f"<<<PIN_TITLE 1>>>\n(pinterest title 1 with hashtags)\n"
+            f"<<<PIN_DESC 1>>>\n(pinterest description 1)\n"
+            f"<<<PIN_TITLE 2>>>\n(pinterest title 2 with hashtags)\n"
+            f"<<<PIN_DESC 2>>>\n(pinterest description 2)\n"
+            f"... continue through <<<PIN_TITLE {PINTEREST_PIN_COUNT}>>> / "
+            f"<<<PIN_DESC {PINTEREST_PIN_COUNT}>>> ..."
+        )
+        raw_response = self.openai_service.generate_text(prompt, tag="pinterest_titles_only")
+        return self._parse_pinterest_pins(workflow_input, raw_response)
+
     def run(
         self, workflow_input: WorkflowInput, research: ResearchSummary
     ) -> tuple[SeoOutline, BlogDraft, ImagePlan, list[PinterestPin]]:
