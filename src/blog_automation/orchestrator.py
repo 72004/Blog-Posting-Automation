@@ -269,17 +269,17 @@ def _split_into_two_paragraphs(text: str) -> list[str]:
   if len(paragraphs) >= 2:
     return paragraphs[:2]
 
-  sentences = [sentence.strip() for sentence in re.split(r"(?<=[.!?])\s+", cleaned) if sentence.strip()]
-  if len(sentences) >= 2:
-    midpoint = max(1, len(sentences) // 2)
-    first_half = " ".join(sentences[:midpoint]).strip()
-    second_half = " ".join(sentences[midpoint:]).strip()
-    return [part for part in [first_half, second_half] if part]
-
   words = cleaned.split()
-  midpoint = max(1, len(words) // 2)
+  if len(words) < 2:
+    return [cleaned]
+
+  midpoint = len(words) // 2
   first_half = " ".join(words[:midpoint]).strip()
   second_half = " ".join(words[midpoint:]).strip()
+  if not first_half or not second_half:
+    midpoint = max(1, len(words) // 2)
+    first_half = " ".join(words[:midpoint]).strip()
+    second_half = " ".join(words[midpoint:]).strip()
   return [part for part in [first_half, second_half] if part]
 
 

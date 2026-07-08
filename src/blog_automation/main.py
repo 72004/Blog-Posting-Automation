@@ -11,7 +11,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Blog automation workflow")
     parser.add_argument("--topic", required=True)
     parser.add_argument("--audience", required=True)
-    parser.add_argument("--length", default="3500 to 4000 words")
+    parser.add_argument("--length", default="3000 to 3500 words")
     parser.add_argument("--tone", default="Modern, conversational, friendly, and engaging")
     parser.add_argument("--dry-run", action="store_true", help="Generate content and images locally without posting to WordPress")
     return parser

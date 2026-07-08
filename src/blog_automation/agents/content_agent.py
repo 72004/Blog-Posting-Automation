@@ -59,6 +59,65 @@ class BlogContentAgent:
     def __init__(self, openai_service: OpenAIService) -> None:
         self.openai_service = openai_service
 
+    def _truncate_to_word_count(self, text: str, target_words: int) -> str:
+        cleaned = normalize_paragraph(text).strip()
+        if not cleaned:
+            return cleaned
+
+        words = cleaned.split()
+        if len(words) <= target_words:
+            return cleaned
+
+        truncated = " ".join(words[:target_words]).strip()
+        if truncated and truncated[-1] not in ".!?":
+            truncated = truncated.rstrip(",;:-") + "."
+        return truncated
+
+    def _pad_to_word_count(self, text: str, target_words: int) -> str:
+        cleaned = normalize_paragraph(text).strip()
+        if not cleaned:
+            cleaned = ""
+
+        words = cleaned.split()
+        if len(words) >= target_words:
+            return cleaned
+
+        filler_sentences = [
+            "This keeps the idea practical, clear, and easy for readers to use right away.",
+            "It also adds a little more helpful detail without making the writing sound stiff.",
+            "A simple, thoughtful explanation like this helps the whole article feel complete.",
+            "That balance makes the advice feel more natural, more useful, and easier to follow.",
+        ]
+        filler_words: list[str] = []
+        filler_index = 0
+        while len(words) + len(filler_words) < target_words:
+            remaining = target_words - (len(words) + len(filler_words))
+            sentence_words = filler_sentences[filler_index % len(filler_sentences)].split()
+            filler_words.extend(sentence_words[:remaining])
+            filler_index += 1
+
+        padded = " ".join(words + filler_words).strip()
+        if padded and padded[-1] not in ".!?":
+            padded = padded + "."
+        return padded
+
+    def _resize_to_word_count(self, text: str, target_words: int) -> str:
+        cleaned = normalize_paragraph(text).strip()
+        current_words = word_count(cleaned)
+        if current_words > target_words:
+            return self._truncate_to_word_count(cleaned, target_words)
+        if current_words < target_words:
+            return self._pad_to_word_count(cleaned, target_words)
+        return cleaned
+
+    def _word_budget_targets(self, section_count: int) -> tuple[int, int, list[int]]:
+        total_target_words = max(3000, min(3500, section_count * 200 + 180))
+        intro_target_words = min(180, total_target_words)
+        remaining_words = max(0, total_target_words - intro_target_words)
+        base_section_words, remainder = divmod(remaining_words, section_count)
+        section_targets = [base_section_words + (1 if index < remainder else 0) for index in range(section_count)]
+        return total_target_words, intro_target_words, section_targets
+
     def _fallback_headings(self, topic: str, section_count: int) -> list[str]:
         base_topic = re.sub(r"^\s*\d+\s*", "", topic).strip()
         if not base_topic:
@@ -76,35 +135,24 @@ class BlogContentAgent:
         if len(explicit_paragraphs) >= 2:
             return explicit_paragraphs[:2]
 
-        sentences = [sentence.strip() for sentence in re.split(r"(?<=[.!?])\s+", cleaned) if sentence.strip()]
-        if len(sentences) >= 2:
-            first_half: list[str] = []
-            second_half: list[str] = []
-            target_words = max(1, word_count(cleaned) // 2)
-            running_words = 0
-
-            for sentence in sentences:
-                sentence_words = word_count(sentence)
-                if not first_half or running_words + sentence_words <= target_words:
-                    first_half.append(sentence)
-                    running_words += sentence_words
-                else:
-                    second_half.append(sentence)
-
-            if not second_half:
-                midpoint = max(1, len(sentences) // 2)
-                first_half = sentences[:midpoint]
-                second_half = sentences[midpoint:]
-
-            return [" ".join(first_half).strip(), " ".join(second_half).strip()]
-
         words = cleaned.split()
-        midpoint = max(1, len(words) // 2)
-        return [" ".join(words[:midpoint]).strip(), " ".join(words[midpoint:]).strip()]
+        if len(words) < 2:
+            return [cleaned]
+
+        midpoint = len(words) // 2
+        left_words = words[:midpoint]
+        right_words = words[midpoint:]
+
+        if not left_words or not right_words:
+            midpoint = max(1, len(words) // 2)
+            left_words = words[:midpoint]
+            right_words = words[midpoint:]
+
+        return [" ".join(left_words).strip(), " ".join(right_words).strip()]
 
     def _generate_intro(self, workflow_input: WorkflowInput, blog_title: str) -> str:
         prompt = (
-            f"Write a short introduction of 80 to 120 words for an article titled '{blog_title}'. "
+            f"Write an introduction of 150 to 220 words for an article titled '{blog_title}'. "
             f"Audience: {workflow_input.audience}. Tone: {workflow_input.tone}. "
             f"Use simple, natural, human-sounding language that feels easy to read."
         )
@@ -114,7 +162,7 @@ class BlogContentAgent:
         self, workflow_input: WorkflowInput, blog_title: str, heading: str, index: int
     ) -> str:
         prompt = (
-            f"Write exactly two HTML paragraphs totaling 250 to 350 words for section {index} titled '{heading}' "
+            f"Write exactly two HTML paragraphs totaling 180 to 220 words for section {index} titled '{heading}' "
             f"for the article '{blog_title}'. Use this topic context: {workflow_input.topic}. "
             f"Audience: {workflow_input.audience}. Tone: {workflow_input.tone}. "
             f"Use easy words, a natural human voice, and original phrasing. Do not copy or sound generic. "
@@ -186,6 +234,9 @@ class BlogContentAgent:
     ) -> tuple[SeoOutline, BlogDraft, ImagePlan, list[PinterestPin]]:
         section_count = extract_section_count(workflow_input.topic)
         blog_title = f"{workflow_input.topic} Guide"
+        total_target_words, intro_target_words, section_targets = self._word_budget_targets(section_count)
+        section_target_words = section_targets[0] if section_targets else 0
+        section_paragraph_target_words = max(40, section_target_words // 2)
 
         prompt = (
             f"Write complete content for a blog article about '{workflow_input.topic}' titled '{blog_title}'. "
@@ -194,12 +245,12 @@ class BlogContentAgent:
             f"Use easy words, sound human, and avoid stiff, robotic, or overly formal phrasing. "
             f"Make the content feel original and plagiarism-free. Number of sections: {section_count}.\n\n"
             f"Do all of the following in a single response, in this exact order:\n"
-            f"1. Write a short introduction of 80 to 120 words for the article.\n"
+            f"1. Write an introduction of about {intro_target_words} words for the article.\n"
             f"2. Generate exactly {section_count} concise H2 headings. Each heading must be specific to the "
             f"topic, natural, and useful to the reader. Do not use placeholders like \"Idea 1\" or \"Heading 1\". "
             f"{_current_year_guidance()}\n"
-            f"3. For each heading, write exactly two HTML paragraphs of 125 to 175 words each, for a total of "
-            f"250 to 350 words per heading. Use simple, clear, human language and keep the writing helpful and "
+            f"3. For each heading, write exactly two HTML paragraphs of about {section_paragraph_target_words} words each, for a total of "
+            f"about {section_target_words} words per heading. Use simple, clear, human language and keep the writing helpful and "
             f"easy to understand. Put a blank line between the two paragraphs. Do not add a heading, bullet list, "
             f"or conclusion to any section.\n"
             f"4. For each heading, write one concise image prompt sentence based only on that section's "
@@ -207,9 +258,8 @@ class BlogContentAgent:
             f"5. Generate exactly {PINTEREST_PIN_COUNT} different Pinterest pin titles for the keyword "
             f"'{workflow_input.topic}', each with 2 to 3 relevant hashtags included. {_pinterest_title_guidance()} "
             f"For each title, also write a short 1 to 2 sentence Pinterest pin description.\n\n"
-            f"Target the full blog article to land between 3500 and 4000 words overall, including the intro and "
-            f"all section paragraphs. If the section count is high, keep each section toward the lower end of the "
-            f"range so the total stays close to that target.\n\n"
+            f"The full blog article must be between 3000 and 3500 words overall, including the intro and all section "
+            f"paragraphs. Do not output less than 3000 words or more than 3500 words. Aim for about {total_target_words} words total.\n\n"
             f"Return your response in exactly this format, with no extra commentary:\n\n"
             f"<<<INTRO>>>\n(the introduction paragraph)\n"
             f"<<<HEADINGS>>>\n(one heading per line, exactly {section_count} headings, no numbering)\n"
@@ -271,6 +321,44 @@ class BlogContentAgent:
                 image_prompt = self._generate_image_prompt(workflow_input, content)
             section_prompts.append(image_prompt)
             alt_texts.append(f"{heading} illustration")
+
+        intro = self._resize_to_word_count(intro, intro_target_words)
+        adjusted_section_contents = [
+            self._resize_to_word_count(section.content, section_targets[index])
+            for index, section in enumerate(sections)
+        ]
+        sections = [
+            SectionDraft(
+                heading=section.heading,
+                content=adjusted_section_contents[index],
+                word_count=word_count(adjusted_section_contents[index]),
+                image_prompt=section.image_prompt,
+                alt_text=section.alt_text,
+            )
+            for index, section in enumerate(sections)
+        ]
+
+        total_words = word_count(intro) + sum(word_count(section.content) for section in sections)
+        if total_words < 3000:
+            deficit = 3000 - total_words
+            sections[-1] = SectionDraft(
+                heading=sections[-1].heading,
+                content=self._pad_to_word_count(sections[-1].content, word_count(sections[-1].content) + deficit),
+                word_count=0,
+                image_prompt=sections[-1].image_prompt,
+                alt_text=sections[-1].alt_text,
+            )
+            sections[-1].word_count = word_count(sections[-1].content)
+        elif total_words > 3500:
+            overflow = total_words - 3500
+            sections[-1] = SectionDraft(
+                heading=sections[-1].heading,
+                content=self._truncate_to_word_count(sections[-1].content, word_count(sections[-1].content) - overflow),
+                word_count=0,
+                image_prompt=sections[-1].image_prompt,
+                alt_text=sections[-1].alt_text,
+            )
+            sections[-1].word_count = word_count(sections[-1].content)
 
         intro_paragraphs = self._split_into_two_paragraphs(intro)
         html_parts = [f"<h1>{blog_title or workflow_input.topic}</h1>"]

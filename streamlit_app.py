@@ -239,7 +239,7 @@ if submitted:
             workflow_input = WorkflowInput(
                 topic=topic.strip(),
                 audience=f"{audience_choice.strip()} in {location_choice.strip()}",
-                length="3500 to 4000 words",
+                length="3000 to 3500 words",
                 tone="Modern, conversational, friendly, and engaging",
             )
 
