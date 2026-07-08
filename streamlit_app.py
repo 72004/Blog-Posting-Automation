@@ -239,8 +239,8 @@ if submitted:
             workflow_input = WorkflowInput(
                 topic=topic.strip(),
                 audience=f"{audience_choice.strip()} in {location_choice.strip()}",
-                length="1500 words",
-                tone="Professional",
+                length="3500 to 4000 words",
+                tone="Modern, conversational, friendly, and engaging",
             )
 
             wordpress_config = WordPressConfig(

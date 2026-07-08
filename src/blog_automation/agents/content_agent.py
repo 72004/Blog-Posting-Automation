@@ -67,10 +67,46 @@ class BlogContentAgent:
         key_phrase = " ".join(words[:4]) if words else base_topic
         return [f"{key_phrase} Tip {index + 1}" for index in range(section_count)]
 
+    def _split_into_two_paragraphs(self, text: str) -> list[str]:
+        cleaned = normalize_paragraph(text).strip()
+        if not cleaned:
+            return [""]
+
+        explicit_paragraphs = [part.strip() for part in re.split(r"\n\s*\n", cleaned) if part.strip()]
+        if len(explicit_paragraphs) >= 2:
+            return explicit_paragraphs[:2]
+
+        sentences = [sentence.strip() for sentence in re.split(r"(?<=[.!?])\s+", cleaned) if sentence.strip()]
+        if len(sentences) >= 2:
+            first_half: list[str] = []
+            second_half: list[str] = []
+            target_words = max(1, word_count(cleaned) // 2)
+            running_words = 0
+
+            for sentence in sentences:
+                sentence_words = word_count(sentence)
+                if not first_half or running_words + sentence_words <= target_words:
+                    first_half.append(sentence)
+                    running_words += sentence_words
+                else:
+                    second_half.append(sentence)
+
+            if not second_half:
+                midpoint = max(1, len(sentences) // 2)
+                first_half = sentences[:midpoint]
+                second_half = sentences[midpoint:]
+
+            return [" ".join(first_half).strip(), " ".join(second_half).strip()]
+
+        words = cleaned.split()
+        midpoint = max(1, len(words) // 2)
+        return [" ".join(words[:midpoint]).strip(), " ".join(words[midpoint:]).strip()]
+
     def _generate_intro(self, workflow_input: WorkflowInput, blog_title: str) -> str:
         prompt = (
-            f"Write a short introduction of 45 to 60 words for an article titled '{blog_title}'. "
-            f"Audience: {workflow_input.audience}. Tone: {workflow_input.tone}."
+            f"Write a short introduction of 80 to 120 words for an article titled '{blog_title}'. "
+            f"Audience: {workflow_input.audience}. Tone: {workflow_input.tone}. "
+            f"Use simple, natural, human-sounding language that feels easy to read."
         )
         return normalize_paragraph(self.openai_service.generate_text(prompt, tag="intro_fallback").strip())
 
@@ -78,10 +114,12 @@ class BlogContentAgent:
         self, workflow_input: WorkflowInput, blog_title: str, heading: str, index: int
     ) -> str:
         prompt = (
-            f"Write a single HTML paragraph of 75 to 80 words for section {index} titled '{heading}' "
+            f"Write exactly two HTML paragraphs totaling 250 to 350 words for section {index} titled '{heading}' "
             f"for the article '{blog_title}'. Use this topic context: {workflow_input.topic}. "
             f"Audience: {workflow_input.audience}. Tone: {workflow_input.tone}. "
-            f"Do not add a heading, bullet list, or conclusion. Return only the paragraph text."
+            f"Use easy words, a natural human voice, and original phrasing. Do not copy or sound generic. "
+            f"Separate the two paragraphs with a blank line. Do not add a heading, bullet list, or conclusion. "
+            f"Return only the paragraph text."
         )
         return normalize_paragraph(self.openai_service.generate_text(prompt, tag="section_fallback").strip())
 
@@ -151,20 +189,27 @@ class BlogContentAgent:
 
         prompt = (
             f"Write complete content for a blog article about '{workflow_input.topic}' titled '{blog_title}'. "
-            f"Audience: {workflow_input.audience}. Length: {workflow_input.length}. Tone: {workflow_input.tone}. "
-            f"Number of sections: {section_count}.\n\n"
+            f"Audience: {workflow_input.audience}. Length target: {workflow_input.length}. Tone: {workflow_input.tone}. "
+            f"Write for readers aged 18 to 44 with a modern, friendly, conversational, and engaging style. "
+            f"Use easy words, sound human, and avoid stiff, robotic, or overly formal phrasing. "
+            f"Make the content feel original and plagiarism-free. Number of sections: {section_count}.\n\n"
             f"Do all of the following in a single response, in this exact order:\n"
-            f"1. Write a short introduction of 45 to 60 words for the article.\n"
+            f"1. Write a short introduction of 80 to 120 words for the article.\n"
             f"2. Generate exactly {section_count} concise H2 headings. Each heading must be specific to the "
             f"topic, natural, and useful to the reader. Do not use placeholders like \"Idea 1\" or \"Heading 1\". "
             f"{_current_year_guidance()}\n"
-            f"3. For each heading, write a single HTML paragraph of 75 to 80 words. Do not add a heading, "
-            f"bullet list, or conclusion to any section.\n"
+            f"3. For each heading, write exactly two HTML paragraphs of 125 to 175 words each, for a total of "
+            f"250 to 350 words per heading. Use simple, clear, human language and keep the writing helpful and "
+            f"easy to understand. Put a blank line between the two paragraphs. Do not add a heading, bullet list, "
+            f"or conclusion to any section.\n"
             f"4. For each heading, write one concise image prompt sentence based only on that section's "
             f"content, for a professional, elegant, realistic photography style image.\n"
             f"5. Generate exactly {PINTEREST_PIN_COUNT} different Pinterest pin titles for the keyword "
             f"'{workflow_input.topic}', each with 2 to 3 relevant hashtags included. {_pinterest_title_guidance()} "
             f"For each title, also write a short 1 to 2 sentence Pinterest pin description.\n\n"
+            f"Target the full blog article to land between 3500 and 4000 words overall, including the intro and "
+            f"all section paragraphs. If the section count is high, keep each section toward the lower end of the "
+            f"range so the total stays close to that target.\n\n"
             f"Return your response in exactly this format, with no extra commentary:\n\n"
             f"<<<INTRO>>>\n(the introduction paragraph)\n"
             f"<<<HEADINGS>>>\n(one heading per line, exactly {section_count} headings, no numbering)\n"
@@ -227,10 +272,17 @@ class BlogContentAgent:
             section_prompts.append(image_prompt)
             alt_texts.append(f"{heading} illustration")
 
-        html_parts = [f"<h1>{blog_title or workflow_input.topic}</h1>", f"<p>{intro}</p>"]
+        intro_paragraphs = self._split_into_two_paragraphs(intro)
+        html_parts = [f"<h1>{blog_title or workflow_input.topic}</h1>"]
+        for paragraph in intro_paragraphs:
+            if paragraph:
+                html_parts.append(f"<p>{paragraph}</p>")
         for index, section in enumerate(sections, start=1):
             html_parts.append(f"<h2>{index}. {section.heading}</h2>")
-            html_parts.append(f"<p>{section.content}</p>")
+            paragraphs = self._split_into_two_paragraphs(section.content)
+            for paragraph in paragraphs:
+                if paragraph:
+                    html_parts.append(f"<p>{paragraph}</p>")
         html_content = "\n".join(html_parts)
 
         seo = SeoOutline(

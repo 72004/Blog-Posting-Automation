@@ -260,6 +260,29 @@ PINTEREST_DYNAMIC_COLOR_NOTE = (
 )
 
 
+def _split_into_two_paragraphs(text: str) -> list[str]:
+  cleaned = normalize_paragraph(text).strip()
+  if not cleaned:
+    return []
+
+  paragraphs = [part.strip() for part in re.split(r"\n\s*\n", cleaned) if part.strip()]
+  if len(paragraphs) >= 2:
+    return paragraphs[:2]
+
+  sentences = [sentence.strip() for sentence in re.split(r"(?<=[.!?])\s+", cleaned) if sentence.strip()]
+  if len(sentences) >= 2:
+    midpoint = max(1, len(sentences) // 2)
+    first_half = " ".join(sentences[:midpoint]).strip()
+    second_half = " ".join(sentences[midpoint:]).strip()
+    return [part for part in [first_half, second_half] if part]
+
+  words = cleaned.split()
+  midpoint = max(1, len(words) // 2)
+  first_half = " ".join(words[:midpoint]).strip()
+  second_half = " ".join(words[midpoint:]).strip()
+  return [part for part in [first_half, second_half] if part]
+
+
 class BlogAutomationOrchestrator:
     def __init__(self, settings: Settings, wordpress_config: WordPressConfig | None = None) -> None:
         self.settings = settings
@@ -323,7 +346,8 @@ class BlogAutomationOrchestrator:
 
         image_urls = [media_item.get("source_url", "") for media_item in media_items]
         html_parts: list[str] = [f"<h1>{seo.blog_title or workflow_input.topic}</h1>"]
-        html_parts.append(f"<p>{normalize_paragraph(blog.intro)}</p>")
+        for paragraph in _split_into_two_paragraphs(blog.intro):
+            html_parts.append(f"<p>{paragraph}</p>")
 
         for section_number, section in enumerate(blog.sections, start=1):
             image_index = section_number - 1
@@ -333,7 +357,8 @@ class BlogAutomationOrchestrator:
                 html_parts.append(
                     f'<p style="text-align: center;"><img src="{image_urls[image_index]}" alt="{alt_text}" style="display: block; margin: 0 auto; max-width: 100%; height: auto;" /></p>'
                 )
-            html_parts.append(f"<p>{normalize_paragraph(section.content)}</p>")
+            for paragraph in _split_into_two_paragraphs(section.content):
+                html_parts.append(f"<p>{paragraph}</p>")
 
         assembled_html = "\n".join(html_parts)
         write_text_file(draft_path, assembled_html)
