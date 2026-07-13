@@ -260,6 +260,16 @@ PINTEREST_DYNAMIC_COLOR_NOTE = (
 )
 
 
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+
+
+def _split_into_sentences(text: str) -> list[str]:
+  cleaned = text.strip()
+  if not cleaned:
+    return []
+  return [sentence.strip() for sentence in _SENTENCE_SPLIT_RE.split(cleaned) if sentence.strip()]
+
+
 def _split_into_two_paragraphs(text: str) -> list[str]:
   cleaned = normalize_paragraph(text).strip()
   if not cleaned:
@@ -269,18 +279,33 @@ def _split_into_two_paragraphs(text: str) -> list[str]:
   if len(paragraphs) >= 2:
     return paragraphs[:2]
 
-  words = cleaned.split()
-  if len(words) < 2:
+  sentences = _split_into_sentences(cleaned)
+  if len(sentences) < 2:
     return [cleaned]
 
-  midpoint = len(words) // 2
-  first_half = " ".join(words[:midpoint]).strip()
-  second_half = " ".join(words[midpoint:]).strip()
-  if not first_half or not second_half:
-    midpoint = max(1, len(words) // 2)
-    first_half = " ".join(words[:midpoint]).strip()
-    second_half = " ".join(words[midpoint:]).strip()
+  total_words = len(cleaned.split())
+  half_words = total_words / 2
+
+  best_index = 1
+  best_diff = None
+  running_words = 0
+  for index, sentence in enumerate(sentences[:-1], start=1):
+    running_words += len(sentence.split())
+    diff = abs(running_words - half_words)
+    if best_diff is None or diff < best_diff:
+      best_diff = diff
+      best_index = index
+
+  first_half = " ".join(sentences[:best_index]).strip()
+  second_half = " ".join(sentences[best_index:]).strip()
   return [part for part in [first_half, second_half] if part]
+
+
+def _ensure_two_paragraphs(text: str) -> tuple[str, str]:
+    parts = _split_into_two_paragraphs(text)
+    first = parts[0] if len(parts) >= 1 else ""
+    second = parts[1] if len(parts) >= 2 else ""
+    return first, second
 
 
 class BlogAutomationOrchestrator:
@@ -307,6 +332,89 @@ class BlogAutomationOrchestrator:
             settings.google_sheet_id,
             credentials_path=settings.google_sheets_credentials_path,
             credentials_json=settings.google_sheets_credentials_json,
+        )
+
+    def _is_blog_home_target(self) -> bool:
+        blog_home_url = (self.settings.blog_home_base_url or "").rstrip("/").lower()
+        target_url = (self.wordpress_service.config.base_url or "").rstrip("/").lower()
+        return bool(blog_home_url) and blog_home_url == target_url
+
+    def _build_default_html(
+        self,
+        workflow_input: WorkflowInput,
+        seo_title: str,
+        blog,
+        images,
+        image_urls: list[str],
+    ) -> str:
+        html_parts: list[str] = [f"<h1>{seo_title or workflow_input.topic}</h1>"]
+        for paragraph in _split_into_two_paragraphs(blog.intro):
+            html_parts.append(f"<p>{paragraph}</p>")
+
+        for section_number, section in enumerate(blog.sections, start=1):
+            image_index = section_number - 1
+            html_parts.append(f"<h2>{section_number}. {section.heading}</h2>")
+            if image_index < len(image_urls) and image_urls[image_index]:
+                alt_text = images.alt_texts[image_index] if image_index < len(images.alt_texts) else section.heading
+                html_parts.append(
+                    f'<p style="text-align: center;"><img src="{image_urls[image_index]}" alt="{alt_text}" style="display: block; margin: 0 auto; max-width: 100%; height: auto;" /></p>'
+                )
+            for paragraph in _split_into_two_paragraphs(section.content):
+                html_parts.append(f"<p>{paragraph}</p>")
+        return "\n".join(html_parts)
+
+    def _build_blog_home_html(
+        self,
+        workflow_input: WorkflowInput,
+        seo_title: str,
+        blog,
+        images,
+        image_urls: list[str],
+    ) -> str:
+        html_parts: list[str] = [
+            f"<h1><b>{seo_title or workflow_input.topic}</b></h1>",
+            "<h2><b>Introduction</b></h2>",
+        ]
+
+        intro_p1, intro_p2 = _ensure_two_paragraphs(blog.intro)
+        html_parts.append(f'<p style="font-weight: 400;">{intro_p1}</p>')
+        html_parts.append(f'<p style="font-weight: 400;">{intro_p2}</p>')
+
+        for section_number, section in enumerate(blog.sections, start=1):
+            image_index = section_number - 1
+            html_parts.append("")
+            html_parts.append(f"<h2><b>{section_number}. {section.heading}</b></h2>")
+            if image_index < len(image_urls) and image_urls[image_index]:
+                alt_text = images.alt_texts[image_index] if image_index < len(images.alt_texts) else section.heading
+                html_parts.append(
+                    f'<p style="text-align: center;"><img style="display: block; margin: 0 auto; max-width: 100%; height: auto;" src="{image_urls[image_index]}" alt="{alt_text}" /></p>'
+                )
+            section_p1, section_p2 = _ensure_two_paragraphs(section.content)
+            html_parts.append(f'<p style="font-weight: 400;">{section_p1}</p>')
+            html_parts.append(f'<p style="font-weight: 400;">{section_p2}</p>')
+
+        conclusion_text = normalize_paragraph((blog.conclusion or "").strip())
+        if not conclusion_text:
+            conclusion_text = f"Summarize the {workflow_input.topic} ideas and encourage the reader to choose the best fit."
+
+        html_parts.append("")
+        html_parts.append("<h2><b>Conclusion</b></h2>")
+        html_parts.append(f'<p style="font-weight: 400;">{conclusion_text}</p>')
+
+        content_html = "\n".join(html_parts)
+
+        return (
+            '<div class="qMYqUG_convSearchResultHighlightRoot">\n'
+            '<div class="">\n'
+            '<section class="text-token-text-primary w-full focus:outline-none">\n'
+            '<div class="text-base my-auto mx-auto pb-10 px-4">\n'
+            '<div class="markdown prose dark:prose-invert wrap-break-word w-full dark markdown-new-styling">\n'
+            f"{content_html}\n"
+            "</div>\n"
+            "</div>\n"
+            "</section>\n"
+            "</div>\n"
+            "</div>"
         )
 
     def run(
@@ -345,22 +453,22 @@ class BlogAutomationOrchestrator:
                 )
 
         image_urls = [media_item.get("source_url", "") for media_item in media_items]
-        html_parts: list[str] = [f"<h1>{seo.blog_title or workflow_input.topic}</h1>"]
-        for paragraph in _split_into_two_paragraphs(blog.intro):
-            html_parts.append(f"<p>{paragraph}</p>")
-
-        for section_number, section in enumerate(blog.sections, start=1):
-            image_index = section_number - 1
-            html_parts.append(f"<h2>{section_number}. {section.heading}</h2>")
-            if image_index < len(image_urls) and image_urls[image_index]:
-                alt_text = images.alt_texts[image_index] if image_index < len(images.alt_texts) else section.heading
-                html_parts.append(
-                    f'<p style="text-align: center;"><img src="{image_urls[image_index]}" alt="{alt_text}" style="display: block; margin: 0 auto; max-width: 100%; height: auto;" /></p>'
-                )
-            for paragraph in _split_into_two_paragraphs(section.content):
-                html_parts.append(f"<p>{paragraph}</p>")
-
-        assembled_html = "\n".join(html_parts)
+        if self._is_blog_home_target():
+            assembled_html = self._build_blog_home_html(
+                workflow_input,
+                seo.blog_title,
+                blog,
+                images,
+                image_urls,
+            )
+        else:
+            assembled_html = self._build_default_html(
+                workflow_input,
+                seo.blog_title,
+                blog,
+                images,
+                image_urls,
+            )
         write_text_file(draft_path, assembled_html)
 
         post_id = None

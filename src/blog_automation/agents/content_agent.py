@@ -36,7 +36,7 @@ def _pinterest_title_guidance() -> str:
     )
 
 TOP_LEVEL_RE = re.compile(
-    r"<<<INTRO>>>\s*(.*?)\s*<<<HEADINGS>>>\s*(.*?)\s*<<<SECTIONS>>>\s*(.*?)\s*<<<PROMPTS>>>\s*(.*)",
+    r"<<<INTRO>>>\s*(.*?)\s*<<<HEADINGS>>>\s*(.*?)\s*<<<SECTIONS>>>\s*(.*?)\s*<<<PROMPTS>>>\s*(.*?)\s*<<<CONCLUSION>>>\s*(.*)",
     re.DOTALL,
 )
 SECTION_MARKER_RE = re.compile(r"<<<SECTION\s*(\d+)>>>\s*(.*?)\s*(?=<<<SECTION\s*\d+>>>|\Z)", re.DOTALL)
@@ -47,6 +47,14 @@ PIN_TITLE_RE = re.compile(
 PIN_DESC_RE = re.compile(
     r"<<<PIN_DESC\s*(\d+)>>>\s*(.*?)\s*(?=<<<PIN_TITLE\s*\d+>>>|<<<PIN_DESC\s*\d+>>>|\Z)", re.DOTALL
 )
+SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+
+
+def _split_into_sentences(text: str) -> list[str]:
+    cleaned = text.strip()
+    if not cleaned:
+        return []
+    return [sentence.strip() for sentence in SENTENCE_SPLIT_RE.split(cleaned) if sentence.strip()]
 
 
 class BlogContentAgent:
@@ -68,6 +76,19 @@ class BlogContentAgent:
         if len(words) <= target_words:
             return cleaned
 
+        sentences = _split_into_sentences(cleaned)
+        kept_sentences: list[str] = []
+        running_words = 0
+        for sentence in sentences:
+            sentence_words = len(sentence.split())
+            if kept_sentences and running_words + sentence_words > target_words:
+                break
+            kept_sentences.append(sentence)
+            running_words += sentence_words
+
+        if kept_sentences:
+            return " ".join(kept_sentences).strip()
+
         truncated = " ".join(words[:target_words]).strip()
         if truncated and truncated[-1] not in ".!?":
             truncated = truncated.rstrip(",;:-") + "."
@@ -75,8 +96,6 @@ class BlogContentAgent:
 
     def _pad_to_word_count(self, text: str, target_words: int) -> str:
         cleaned = normalize_paragraph(text).strip()
-        if not cleaned:
-            cleaned = ""
 
         words = cleaned.split()
         if len(words) >= target_words:
@@ -88,18 +107,13 @@ class BlogContentAgent:
             "A simple, thoughtful explanation like this helps the whole article feel complete.",
             "That balance makes the advice feel more natural, more useful, and easier to follow.",
         ]
-        filler_words: list[str] = []
+        padded_words = list(words)
         filler_index = 0
-        while len(words) + len(filler_words) < target_words:
-            remaining = target_words - (len(words) + len(filler_words))
-            sentence_words = filler_sentences[filler_index % len(filler_sentences)].split()
-            filler_words.extend(sentence_words[:remaining])
+        while len(padded_words) < target_words:
+            padded_words.extend(filler_sentences[filler_index % len(filler_sentences)].split())
             filler_index += 1
 
-        padded = " ".join(words + filler_words).strip()
-        if padded and padded[-1] not in ".!?":
-            padded = padded + "."
-        return padded
+        return " ".join(padded_words).strip()
 
     def _resize_to_word_count(self, text: str, target_words: int) -> str:
         cleaned = normalize_paragraph(text).strip()
@@ -111,7 +125,7 @@ class BlogContentAgent:
         return cleaned
 
     def _word_budget_targets(self, section_count: int) -> tuple[int, int, list[int]]:
-        total_target_words = max(3000, min(3500, section_count * 200 + 180))
+        total_target_words = max(2500, min(3000, section_count * 200 + 180))
         intro_target_words = min(180, total_target_words)
         remaining_words = max(0, total_target_words - intro_target_words)
         base_section_words, remainder = divmod(remaining_words, section_count)
@@ -135,20 +149,26 @@ class BlogContentAgent:
         if len(explicit_paragraphs) >= 2:
             return explicit_paragraphs[:2]
 
-        words = cleaned.split()
-        if len(words) < 2:
+        sentences = _split_into_sentences(cleaned)
+        if len(sentences) < 2:
             return [cleaned]
 
-        midpoint = len(words) // 2
-        left_words = words[:midpoint]
-        right_words = words[midpoint:]
+        total_words = len(cleaned.split())
+        half_words = total_words / 2
 
-        if not left_words or not right_words:
-            midpoint = max(1, len(words) // 2)
-            left_words = words[:midpoint]
-            right_words = words[midpoint:]
+        best_index = 1
+        best_diff = None
+        running_words = 0
+        for index, sentence in enumerate(sentences[:-1], start=1):
+            running_words += len(sentence.split())
+            diff = abs(running_words - half_words)
+            if best_diff is None or diff < best_diff:
+                best_diff = diff
+                best_index = index
 
-        return [" ".join(left_words).strip(), " ".join(right_words).strip()]
+        left = " ".join(sentences[:best_index]).strip()
+        right = " ".join(sentences[best_index:]).strip()
+        return [part for part in [left, right] if part]
 
     def _generate_intro(self, workflow_input: WorkflowInput, blog_title: str) -> str:
         prompt = (
@@ -157,6 +177,16 @@ class BlogContentAgent:
             f"Use simple, natural, human-sounding language that feels easy to read."
         )
         return normalize_paragraph(self.openai_service.generate_text(prompt, tag="intro_fallback").strip())
+
+    def _generate_conclusion(self, workflow_input: WorkflowInput, blog_title: str, section_titles: list[str]) -> str:
+        prompt = (
+            f"Write a conclusion of 120 to 160 words for an article titled '{blog_title}' about "
+            f"'{workflow_input.topic}'. Audience: {workflow_input.audience}. Tone: {workflow_input.tone}. "
+            f"Briefly summarize the key takeaways from these sections: {', '.join(section_titles)}. "
+            f"End with an encouraging note that helps the reader choose the best fit for their needs. "
+            f"Use simple, natural, human-sounding language. Do not add a heading. Return only the conclusion paragraph."
+        )
+        return normalize_paragraph(self.openai_service.generate_text(prompt, tag="conclusion_fallback").strip())
 
     def _generate_section_content(
         self, workflow_input: WorkflowInput, blog_title: str, heading: str, index: int
@@ -257,9 +287,12 @@ class BlogContentAgent:
             f"content, for a professional, elegant, realistic photography style image.\n"
             f"5. Generate exactly {PINTEREST_PIN_COUNT} different Pinterest pin titles for the keyword "
             f"'{workflow_input.topic}', each with 2 to 3 relevant hashtags included. {_pinterest_title_guidance()} "
-            f"For each title, also write a short 1 to 2 sentence Pinterest pin description.\n\n"
-            f"The full blog article must be between 3000 and 3500 words overall, including the intro and all section "
-            f"paragraphs. Do not output less than 3000 words or more than 3500 words. Aim for about {total_target_words} words total.\n\n"
+            f"For each title, also write a short 1 to 2 sentence Pinterest pin description.\n"
+            f"6. Write a conclusion of about 120 to 160 words that briefly summarizes the key takeaways from all "
+            f"the sections above and ends with an encouraging note that helps the reader choose the best fit for "
+            f"their needs. Do not add a heading, and do not simply repeat the article title verbatim.\n\n"
+            f"The full blog article must be between 2500 and 3000 words overall, including the intro and all section "
+            f"paragraphs. Do not output less than 2500 words or more than 3000 words. Aim for about {total_target_words} words total.\n\n"
             f"Return your response in exactly this format, with no extra commentary:\n\n"
             f"<<<INTRO>>>\n(the introduction paragraph)\n"
             f"<<<HEADINGS>>>\n(one heading per line, exactly {section_count} headings, no numbering)\n"
@@ -271,6 +304,7 @@ class BlogContentAgent:
             f"<<<PROMPT 1>>>\n(image prompt for heading 1)\n"
             f"<<<PROMPT 2>>>\n(image prompt for heading 2)\n"
             f"... continue through <<<PROMPT {section_count}>>> ...\n"
+            f"<<<CONCLUSION>>>\n(the conclusion paragraph)\n"
             f"<<<PINTEREST>>>\n"
             f"<<<PIN_TITLE 1>>>\n(pinterest title 1 with hashtags)\n"
             f"<<<PIN_DESC 1>>>\n(pinterest description 1)\n"
@@ -285,11 +319,12 @@ class BlogContentAgent:
 
         match = TOP_LEVEL_RE.search(main_text)
         if match:
-            intro_text, headings_text, sections_text, prompts_text = match.groups()
+            intro_text, headings_text, sections_text, prompts_text, conclusion_text = match.groups()
         else:
-            intro_text, headings_text, sections_text, prompts_text = "", "", "", ""
+            intro_text, headings_text, sections_text, prompts_text, conclusion_text = "", "", "", "", ""
 
         intro = normalize_paragraph(intro_text.strip())
+        conclusion = normalize_paragraph(conclusion_text.strip())
 
         section_titles = [
             line.strip("-• \t\r\n1234567890.") for line in headings_text.splitlines() if line.strip()
@@ -300,6 +335,9 @@ class BlogContentAgent:
 
         if not intro:
             intro = self._generate_intro(workflow_input, blog_title)
+
+        if not conclusion:
+            conclusion = self._generate_conclusion(workflow_input, blog_title, section_titles)
 
         section_map = {
             int(index): normalize_paragraph(content.strip())
@@ -339,8 +377,8 @@ class BlogContentAgent:
         ]
 
         total_words = word_count(intro) + sum(word_count(section.content) for section in sections)
-        if total_words < 3000:
-            deficit = 3000 - total_words
+        if total_words < 2500:
+            deficit = 2500 - total_words
             sections[-1] = SectionDraft(
                 heading=sections[-1].heading,
                 content=self._pad_to_word_count(sections[-1].content, word_count(sections[-1].content) + deficit),
@@ -349,8 +387,8 @@ class BlogContentAgent:
                 alt_text=sections[-1].alt_text,
             )
             sections[-1].word_count = word_count(sections[-1].content)
-        elif total_words > 3500:
-            overflow = total_words - 3500
+        elif total_words > 3000:
+            overflow = total_words - 3000
             sections[-1] = SectionDraft(
                 heading=sections[-1].heading,
                 content=self._truncate_to_word_count(sections[-1].content, word_count(sections[-1].content) - overflow),
@@ -390,7 +428,7 @@ class BlogContentAgent:
             sections=sections,
             html_content=html_content,
             internal_linking_suggestions=["/services", "/blog"],
-            conclusion=f"Summarize the {workflow_input.topic} ideas and encourage the reader to choose the best fit.",
+            conclusion=conclusion,
         )
         images = ImagePlan(cover_prompt="", section_prompts=section_prompts, alt_texts=alt_texts)
 
