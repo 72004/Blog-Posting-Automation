@@ -124,6 +124,69 @@ class BlogContentAgent:
             return self._pad_to_word_count(cleaned, target_words)
         return cleaned
 
+    def _adjust_total_words(
+        self, sections: list[SectionDraft], amount: int, grow: bool, min_words: int = 60
+    ) -> list[SectionDraft]:
+        """Grow or shrink the article by `amount` words, spread evenly across all sections.
+
+        Splitting the adjustment evenly (instead of dumping it all on the last section) keeps
+        every heading's content roughly the same length. Any leftover that a section can't
+        absorb on its own (because it would drop below `min_words`) rolls forward to the next
+        section so the total still lands on target.
+        """
+        if amount <= 0 or not sections:
+            return sections
+
+        adjusted = list(sections)
+        count = len(adjusted)
+        base_share, remainder = divmod(amount, count)
+        shares = [base_share + (1 if index < remainder else 0) for index in range(count)]
+
+        leftover = 0
+        for index in range(count):
+            section = adjusted[index]
+            current_words = word_count(section.content)
+            share = shares[index] + leftover
+            leftover = 0
+
+            if grow:
+                new_content = self._pad_to_word_count(section.content, current_words + share)
+            else:
+                available = max(0, current_words - min_words)
+                trim_amount = min(share, available)
+                leftover = share - trim_amount
+                new_content = self._truncate_to_word_count(section.content, current_words - trim_amount)
+
+            adjusted[index] = SectionDraft(
+                heading=section.heading,
+                content=new_content,
+                word_count=word_count(new_content),
+                image_prompt=section.image_prompt,
+                alt_text=section.alt_text,
+            )
+
+        if not grow and leftover > 0:
+            index = count - 1
+            while leftover > 0 and index >= 0:
+                section = adjusted[index]
+                current_words = word_count(section.content)
+                available = max(0, current_words - min_words)
+                trim_amount = min(leftover, available)
+                if trim_amount > 0:
+                    new_content = self._truncate_to_word_count(section.content, current_words - trim_amount)
+                    new_word_count = word_count(new_content)
+                    leftover -= current_words - new_word_count
+                    adjusted[index] = SectionDraft(
+                        heading=section.heading,
+                        content=new_content,
+                        word_count=new_word_count,
+                        image_prompt=section.image_prompt,
+                        alt_text=section.alt_text,
+                    )
+                index -= 1
+
+        return adjusted
+
     def _word_budget_targets(self, section_count: int) -> tuple[int, int, list[int]]:
         total_target_words = max(2500, min(3000, section_count * 200 + 180))
         intro_target_words = min(180, total_target_words)
@@ -140,35 +203,41 @@ class BlogContentAgent:
         key_phrase = " ".join(words[:4]) if words else base_topic
         return [f"{key_phrase} Tip {index + 1}" for index in range(section_count)]
 
-    def _split_into_two_paragraphs(self, text: str) -> list[str]:
+    def _split_into_paragraphs(self, text: str, num_paragraphs: int = 4) -> list[str]:
         cleaned = normalize_paragraph(text).strip()
+        cleaned = re.sub(r"\n\s*\n", " ", cleaned)
+        cleaned = normalize_paragraph(cleaned)
         if not cleaned:
             return [""]
 
-        explicit_paragraphs = [part.strip() for part in re.split(r"\n\s*\n", cleaned) if part.strip()]
-        if len(explicit_paragraphs) >= 2:
-            return explicit_paragraphs[:2]
-
         sentences = _split_into_sentences(cleaned)
-        if len(sentences) < 2:
+        if len(sentences) <= 1:
             return [cleaned]
 
-        total_words = len(cleaned.split())
-        half_words = total_words / 2
+        num_paragraphs = max(1, min(num_paragraphs, len(sentences)))
+        total_words = sum(len(sentence.split()) for sentence in sentences)
 
-        best_index = 1
-        best_diff = None
+        paragraphs: list[str] = []
+        current: list[str] = []
         running_words = 0
-        for index, sentence in enumerate(sentences[:-1], start=1):
-            running_words += len(sentence.split())
-            diff = abs(running_words - half_words)
-            if best_diff is None or diff < best_diff:
-                best_diff = diff
-                best_index = index
+        next_threshold_index = 1
 
-        left = " ".join(sentences[:best_index]).strip()
-        right = " ".join(sentences[best_index:]).strip()
-        return [part for part in [left, right] if part]
+        for position, sentence in enumerate(sentences):
+            current.append(sentence)
+            running_words += len(sentence.split())
+            is_last_sentence = position == len(sentences) - 1
+            paragraphs_remaining = num_paragraphs - len(paragraphs)
+            threshold = total_words * next_threshold_index / num_paragraphs
+
+            if not is_last_sentence and paragraphs_remaining > 1 and running_words >= threshold:
+                paragraphs.append(" ".join(current).strip())
+                current = []
+                next_threshold_index += 1
+
+        if current:
+            paragraphs.append(" ".join(current).strip())
+
+        return [part for part in paragraphs if part]
 
     def _generate_intro(self, workflow_input: WorkflowInput, blog_title: str) -> str:
         prompt = (
@@ -379,33 +448,19 @@ class BlogContentAgent:
         total_words = word_count(intro) + sum(word_count(section.content) for section in sections)
         if total_words < 2500:
             deficit = 2500 - total_words
-            sections[-1] = SectionDraft(
-                heading=sections[-1].heading,
-                content=self._pad_to_word_count(sections[-1].content, word_count(sections[-1].content) + deficit),
-                word_count=0,
-                image_prompt=sections[-1].image_prompt,
-                alt_text=sections[-1].alt_text,
-            )
-            sections[-1].word_count = word_count(sections[-1].content)
+            sections = self._adjust_total_words(sections, deficit, grow=True)
         elif total_words > 3000:
             overflow = total_words - 3000
-            sections[-1] = SectionDraft(
-                heading=sections[-1].heading,
-                content=self._truncate_to_word_count(sections[-1].content, word_count(sections[-1].content) - overflow),
-                word_count=0,
-                image_prompt=sections[-1].image_prompt,
-                alt_text=sections[-1].alt_text,
-            )
-            sections[-1].word_count = word_count(sections[-1].content)
+            sections = self._adjust_total_words(sections, overflow, grow=False)
 
-        intro_paragraphs = self._split_into_two_paragraphs(intro)
+        intro_paragraphs = self._split_into_paragraphs(intro)
         html_parts = [f"<h1>{blog_title or workflow_input.topic}</h1>"]
         for paragraph in intro_paragraphs:
             if paragraph:
                 html_parts.append(f"<p>{paragraph}</p>")
         for index, section in enumerate(sections, start=1):
             html_parts.append(f"<h2>{index}. {section.heading}</h2>")
-            paragraphs = self._split_into_two_paragraphs(section.content)
+            paragraphs = self._split_into_paragraphs(section.content)
             for paragraph in paragraphs:
                 if paragraph:
                     html_parts.append(f"<p>{paragraph}</p>")

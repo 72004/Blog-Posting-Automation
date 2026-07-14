@@ -270,42 +270,41 @@ def _split_into_sentences(text: str) -> list[str]:
   return [sentence.strip() for sentence in _SENTENCE_SPLIT_RE.split(cleaned) if sentence.strip()]
 
 
-def _split_into_two_paragraphs(text: str) -> list[str]:
+def _split_into_paragraphs(text: str, num_paragraphs: int = 4) -> list[str]:
   cleaned = normalize_paragraph(text).strip()
+  cleaned = re.sub(r"\n\s*\n", " ", cleaned)
+  cleaned = normalize_paragraph(cleaned)
   if not cleaned:
     return []
 
-  paragraphs = [part.strip() for part in re.split(r"\n\s*\n", cleaned) if part.strip()]
-  if len(paragraphs) >= 2:
-    return paragraphs[:2]
-
   sentences = _split_into_sentences(cleaned)
-  if len(sentences) < 2:
+  if len(sentences) <= 1:
     return [cleaned]
 
-  total_words = len(cleaned.split())
-  half_words = total_words / 2
+  num_paragraphs = max(1, min(num_paragraphs, len(sentences)))
+  total_words = sum(len(sentence.split()) for sentence in sentences)
 
-  best_index = 1
-  best_diff = None
+  paragraphs: list[str] = []
+  current: list[str] = []
   running_words = 0
-  for index, sentence in enumerate(sentences[:-1], start=1):
+  next_threshold_index = 1
+
+  for position, sentence in enumerate(sentences):
+    current.append(sentence)
     running_words += len(sentence.split())
-    diff = abs(running_words - half_words)
-    if best_diff is None or diff < best_diff:
-      best_diff = diff
-      best_index = index
+    is_last_sentence = position == len(sentences) - 1
+    paragraphs_remaining = num_paragraphs - len(paragraphs)
+    threshold = total_words * next_threshold_index / num_paragraphs
 
-  first_half = " ".join(sentences[:best_index]).strip()
-  second_half = " ".join(sentences[best_index:]).strip()
-  return [part for part in [first_half, second_half] if part]
+    if not is_last_sentence and paragraphs_remaining > 1 and running_words >= threshold:
+      paragraphs.append(" ".join(current).strip())
+      current = []
+      next_threshold_index += 1
 
+  if current:
+    paragraphs.append(" ".join(current).strip())
 
-def _ensure_two_paragraphs(text: str) -> tuple[str, str]:
-    parts = _split_into_two_paragraphs(text)
-    first = parts[0] if len(parts) >= 1 else ""
-    second = parts[1] if len(parts) >= 2 else ""
-    return first, second
+  return [part for part in paragraphs if part]
 
 
 class BlogAutomationOrchestrator:
@@ -348,7 +347,7 @@ class BlogAutomationOrchestrator:
         image_urls: list[str],
     ) -> str:
         html_parts: list[str] = [f"<h1>{seo_title or workflow_input.topic}</h1>"]
-        for paragraph in _split_into_two_paragraphs(blog.intro):
+        for paragraph in _split_into_paragraphs(blog.intro):
             html_parts.append(f"<p>{paragraph}</p>")
 
         for section_number, section in enumerate(blog.sections, start=1):
@@ -359,8 +358,15 @@ class BlogAutomationOrchestrator:
                 html_parts.append(
                     f'<p style="text-align: center;"><img src="{image_urls[image_index]}" alt="{alt_text}" style="display: block; margin: 0 auto; max-width: 100%; height: auto;" /></p>'
                 )
-            for paragraph in _split_into_two_paragraphs(section.content):
+            for paragraph in _split_into_paragraphs(section.content):
                 html_parts.append(f"<p>{paragraph}</p>")
+
+        conclusion_text = normalize_paragraph((blog.conclusion or "").strip())
+        if not conclusion_text:
+            conclusion_text = f"Summarize the {workflow_input.topic} ideas and encourage the reader to choose the best fit."
+        html_parts.append("<h2>Conclusion</h2>")
+        html_parts.append(f"<p>{conclusion_text}</p>")
+
         return "\n".join(html_parts)
 
     def _build_blog_home_html(
@@ -376,9 +382,8 @@ class BlogAutomationOrchestrator:
             "<h2><b>Introduction</b></h2>",
         ]
 
-        intro_p1, intro_p2 = _ensure_two_paragraphs(blog.intro)
-        html_parts.append(f'<p style="font-weight: 400;">{intro_p1}</p>')
-        html_parts.append(f'<p style="font-weight: 400;">{intro_p2}</p>')
+        for paragraph in _split_into_paragraphs(blog.intro):
+            html_parts.append(f'<p style="font-weight: 400;">{paragraph}</p>')
 
         for section_number, section in enumerate(blog.sections, start=1):
             image_index = section_number - 1
@@ -389,9 +394,8 @@ class BlogAutomationOrchestrator:
                 html_parts.append(
                     f'<p style="text-align: center;"><img style="display: block; margin: 0 auto; max-width: 100%; height: auto;" src="{image_urls[image_index]}" alt="{alt_text}" /></p>'
                 )
-            section_p1, section_p2 = _ensure_two_paragraphs(section.content)
-            html_parts.append(f'<p style="font-weight: 400;">{section_p1}</p>')
-            html_parts.append(f'<p style="font-weight: 400;">{section_p2}</p>')
+            for paragraph in _split_into_paragraphs(section.content):
+                html_parts.append(f'<p style="font-weight: 400;">{paragraph}</p>')
 
         conclusion_text = normalize_paragraph((blog.conclusion or "").strip())
         if not conclusion_text:
