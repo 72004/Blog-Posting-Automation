@@ -11,6 +11,35 @@ from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponen
 
 logger = logging.getLogger(__name__)
 
+_RETRYABLE_STATUSES = {415, 429, 500, 502, 503, 504}
+
+
+def _rewind_file_streams(retry_state) -> None:
+    """Reset any file streams in the 'files' kwarg so a retry re-sends full content
+    instead of an empty body (the first attempt leaves the stream at EOF)."""
+    files = (retry_state.kwargs or {}).get("files")
+    if not files:
+        return
+    for value in files.values():
+        stream = value[1] if isinstance(value, tuple) else value
+        if hasattr(stream, "seek"):
+            try:
+                stream.seek(0)
+            except (OSError, ValueError):
+                pass
+
+
+_wordpress_retry = retry(
+    retry=retry_if_exception(
+        lambda exc: isinstance(exc, requests.HTTPError)
+        and getattr(getattr(exc, "response", None), "status_code", None) in _RETRYABLE_STATUSES
+    ),
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=1, max=4),
+    before=_rewind_file_streams,
+    reraise=True,
+)
+
 
 @dataclass
 class WordPressConfig:
@@ -36,6 +65,17 @@ class WordPressService:
             "Authorization": f"Basic {base64.b64encode(token).decode('utf-8')}"
         }
         self.session = requests.Session()
+        # WAF/security plugins on some hosts flag the default python-requests
+        # User-Agent as bot traffic and block/miscache the request. A normal
+        # browser UA avoids that.
+        self.session.headers.update(
+            {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                )
+            }
+        )
 
     def _raise_wordpress_error(self, response: requests.Response) -> None:
         detail = response.text.strip()
@@ -64,16 +104,7 @@ class WordPressService:
             )
         response.raise_for_status()
 
-    @retry(
-        retry=retry_if_exception(
-            lambda exc: isinstance(exc, requests.HTTPError)
-            and getattr(getattr(exc, "response", None), "status_code", None)
-            in {429, 500, 502, 503, 504}
-        ),
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=1, max=4),
-        reraise=True,
-    )
+    @_wordpress_retry
     def _post(self, url: str, **kwargs: object) -> requests.Response:
         extra_headers = kwargs.pop("headers", {})
         timeout = kwargs.pop("timeout", 60)
@@ -91,12 +122,12 @@ class WordPressService:
         """Verify that the configured credentials are valid."""
         users_endpoint = f"{self.config.base_url}/wp-json/wp/v2/users/me"
         logger.debug("Verifying WordPress account at %s (user: %s)", users_endpoint, self.config.username)
-        response = self.session.get(users_endpoint, headers=self.auth_header, timeout=30)
-        if not response.ok:
-            self._raise_wordpress_error(response)
+        response = self._get(users_endpoint, timeout=30)
         data = response.json()
         logger.info("WordPress account verified: %s (id=%s)", data.get("name"), data.get("id"))
         return data
+
+    @_wordpress_retry
     def _get(self, url: str, **kwargs: object) -> requests.Response:
         response = self.session.get(
             url,
