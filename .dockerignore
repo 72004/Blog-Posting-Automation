@@ -1,0 +1,15 @@
+.git
+.gitignore
+.env
+.env.*
+*.json
+__pycache__
+**/__pycache__
+*.pyc
+output
+.claude
+.verify_venv
+README.md
+Dockerfile
+.dockerignore
+_verify_upload.py

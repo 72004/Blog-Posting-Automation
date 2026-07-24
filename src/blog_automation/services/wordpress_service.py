@@ -11,7 +11,7 @@ from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponen
 
 logger = logging.getLogger(__name__)
 
-_RETRYABLE_STATUSES = {415, 429, 500, 502, 503, 504}
+_RETRYABLE_STATUSES = {408, 415, 429, 500, 502, 503, 504}
 
 
 def _rewind_file_streams(retry_state) -> None:
@@ -29,11 +29,16 @@ def _rewind_file_streams(retry_state) -> None:
                 pass
 
 
+def _is_retryable(exc: BaseException) -> bool:
+    if isinstance(exc, requests.HTTPError):
+        return getattr(getattr(exc, "response", None), "status_code", None) in _RETRYABLE_STATUSES
+    # Connection/SSL/timeout drops (e.g. a proxy silently closing a reused
+    # keep-alive connection) are transient network failures, not HTTP responses.
+    return isinstance(exc, (requests.exceptions.ConnectionError, requests.exceptions.Timeout))
+
+
 _wordpress_retry = retry(
-    retry=retry_if_exception(
-        lambda exc: isinstance(exc, requests.HTTPError)
-        and getattr(getattr(exc, "response", None), "status_code", None) in _RETRYABLE_STATUSES
-    ),
+    retry=retry_if_exception(_is_retryable),
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=1, max=4),
     before=_rewind_file_streams,
@@ -179,14 +184,13 @@ class WordPressService:
             raise FileNotFoundError(f"Image file not found: {image_path}")
 
         media_endpoint = f"{self.config.base_url}/wp-json/wp/v2/media"
-        headers = {"Content-Disposition": f'attachment; filename="{path.name}"'}
 
         with path.open("rb") as image_file:
             response = self._post(
                 media_endpoint,
-                headers=headers,
+                headers={"Connection": "close"},
                 files={"file": (path.name, image_file, "image/png")},
-                timeout=60,
+                timeout=120,
             )
 
         payload = response.json()
